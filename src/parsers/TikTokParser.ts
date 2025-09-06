@@ -13,10 +13,54 @@ interface TiktokNoteData {
 }
 
 class TikTokParser extends Parser {
-    private PATTERN = /(tiktok.com)\/(\S+)\/(video)\/(\d+)/;
+    private CANONICAL_PATTERN = /(tiktok.com)\/(\S+)\/(video)\/(\d+)/;
+    private SHORT_PATTERN = /((?:vt|vm)?\.?tiktok\.com)\/t\/([a-zA-Z0-9]+)/;
 
-    test(clipboardContent: string): boolean | Promise<boolean> {
-        return this.isValidUrl(clipboardContent) && this.PATTERN.test(clipboardContent);
+    async test(clipboardContent: string): Promise<boolean> {
+        if (!this.isValidUrl(clipboardContent)) {
+            return false;
+        }
+
+        if (this.CANONICAL_PATTERN.test(clipboardContent)) {
+            return true;
+        }
+
+        if (this.SHORT_PATTERN.test(clipboardContent)) {
+            try {
+                const canonicalUrl = await this.resolveShortUrl(clipboardContent);
+                return this.CANONICAL_PATTERN.test(canonicalUrl);
+            } catch (error) {
+                console.error('Failed to resolve TikTok short URL:', error);
+                return false;
+            }
+        }
+
+        return false;
+    }
+
+    private async resolveShortUrl(url: string): Promise<string> {
+        const response = await request({
+            method: 'GET',
+            url,
+            headers: {
+                'user-agent':
+                    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/108.0.0.0 Safari/537.36',
+            },
+        });
+
+        const doc = new DOMParser().parseFromString(response, 'text/html');
+        const canonical = doc.querySelector('link[rel="canonical"]');
+        if (canonical && canonical.getAttribute('href')) {
+            return canonical.getAttribute('href') as string;
+        }
+
+        // Fallback: try to find canonical URL in meta tags
+        const metaUrl = doc.querySelector('meta[property="og:url"]');
+        if (metaUrl && metaUrl.getAttribute('content')) {
+            return metaUrl.getAttribute('content') as string;
+        }
+
+        throw new Error('Could not resolve canonical TikTok URL');
     }
 
     async prepareNote(clipboardContent: string): Promise<Note> {
@@ -34,6 +78,11 @@ class TikTokParser extends Parser {
     }
 
     private async parseHtml(url: string, createdAt: Date): Promise<TiktokNoteData> {
+        // If it's a short URL, resolve it first
+        if (this.SHORT_PATTERN.test(url)) {
+            url = await this.resolveShortUrl(url);
+        }
+
         const response = await request({
             method: 'GET',
             url,
@@ -44,7 +93,7 @@ class TikTokParser extends Parser {
         });
 
         const videoHTML = new DOMParser().parseFromString(response, 'text/html');
-        const videoRegexExec = this.PATTERN.exec(url);
+        const videoRegexExec = this.CANONICAL_PATTERN.exec(url);
 
         return {
             date: this.getFormattedDateForContent(createdAt),
